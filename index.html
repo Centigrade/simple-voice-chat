@@ -182,7 +182,7 @@
     const blob = new Blob(chunks, { type });
 
     setState('sending', '<span class="spinner"></span>Mic off — sending to webhook…', 'Transcribing your message');
-    addMsg('🎙️ Voice message sent', 'user');
+    //addMsg('🎙️ Voice message sent', 'user');
 
     const fd = new FormData();
     fd.append('data', blob, 'voice.' + ext);
