@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Chat</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --text: #1d1d1b; --muted: #6b6b66;
+    --idle: #2f6fed; --rec: #e5383b; --busy: #d98b00; --ok: #2a9d5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex; justify-content: center; padding: 24px 16px;
+  }
+  main { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 20px; }
+  h1 { font-size: 1.25rem; margin: 0; }
+
+  .panel {
+    background: var(--card); border-radius: 16px; padding: 28px 20px;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+
+  #mic {
+    width: 110px; height: 110px; border-radius: 50%; border: none; cursor: pointer;
+    background: var(--idle); color: #fff; display: grid; place-items: center;
+    transition: background .2s, transform .1s; position: relative;
+  }
+  #mic:active { transform: scale(.96); }
+  #mic:disabled { cursor: wait; }
+  #mic svg { width: 46px; height: 46px; }
+
+  /* State colours */
+  body[data-state="recording"] #mic { background: var(--rec); animation: pulse 1.4s infinite; }
+  body[data-state="sending"]   #mic { background: var(--busy); }
+  body[data-state="error"]     #mic { background: var(--muted); }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(229,56,59,.55); }
+    70%  { box-shadow: 0 0 0 26px rgba(229,56,59,0); }
+    100% { box-shadow: 0 0 0 0 rgba(229,56,59,0); }
+  }
+
+  #status { font-weight: 600; font-size: 1.1rem; text-align: center; }
+  #hint { color: var(--muted); font-size: .9rem; text-align: center; min-height: 1.4em; }
+
+  #timer {
+    font-variant-numeric: tabular-nums; font-size: 1.6rem; font-weight: 600;
+    color: var(--rec); display: none;
+  }
+  body[data-state="recording"] #timer { display: block; }
+
+  .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--rec); margin-right: 8px; vertical-align: middle;
+    animation: blink 1s infinite;
+  }
+  @keyframes blink { 50% { opacity: .2; } }
+
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px;
+    border: 2px solid var(--busy); border-right-color: transparent; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #log { display: flex; flex-direction: column; gap: 10px; }
+  .msg { padding: 10px 14px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--idle); color: #fff; }
+  .msg.bot  { align-self: flex-start; background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .msg.sys  { align-self: center; color: var(--muted); font-size: .85rem; }
+  .msg.err  { align-self: center; color: var(--rec); font-size: .9rem; }
+</style>
+</head>
+<body data-state="idle">
+<main>
+  <h1>Voice Chat</h1>
+
+  <section class="panel">
+    <button id="mic" aria-label="Start recording">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+      </svg>
+    </button>
+    <div id="timer">0:00</div>
+    <div id="status">Mic is off</div>
+    <div id="hint">Tap the mic to start talking</div>
+  </section>
+
+  <section id="log" aria-live="polite"></section>
+</main>
+
+<script>
+  // ── Config ────────────────────────────────────────────────
+  const WEBHOOK_URL = 'YOUR_WEBHOOK_B_URL';
+  const SESSION_ID  = 'session-' + Math.random().toString(36).slice(2, 10); // for AI memory
+
+  // ── Elements ──────────────────────────────────────────────
+  const micBtn = document.getElementById('mic');
+  const statusEl = document.getElementById('status');
+  const hintEl = document.getElementById('hint');
+  const timerEl = document.getElementById('timer');
+  const logEl = document.getElementById('log');
+
+  let recorder = null, stream = null, chunks = [];
+  let timerId = null, startedAt = 0;
+
+  // ── UI state ──────────────────────────────────────────────
+  function setState(state, status, hint = '') {
+    document.body.dataset.state = state;
+    statusEl.innerHTML = status;
+    hintEl.textContent = hint;
+    micBtn.disabled = state === 'sending';
+    micBtn.setAttribute('aria-label', state === 'recording' ? 'Stop recording and send' : 'Start recording');
+  }
+
+  function addMsg(text, cls) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.textContent = text;
+    logEl.appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
+
+  function startTimer() {
+    startedAt = Date.now();
+    timerEl.textContent = '0:00';
+    timerId = setInterval(() => {
+      const s = Math.floor((Date.now() - startedAt) / 1000);
+      timerEl.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }, 250);
+  }
+  function stopTimer() { clearInterval(timerId); return Math.round((Date.now() - startedAt) / 1000); }
+
+  // Safari records mp4, Chrome/Firefox record webm — both work with Whisper
+  function pickMimeType() {
+    const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+    return types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+  }
+
+  // ── Recording ─────────────────────────────────────────────
+  async function startRecording() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      setState('error', 'Microphone blocked', 'Allow mic access in your browser, then tap again');
+      addMsg('Could not access the microphone: ' + err.message, 'err');
+      return;
+    }
+    const mimeType = pickMimeType();
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = sendRecording;
+    recorder.start();
+    startTimer();
+    setState('recording', '<span class="dot"></span>Recording — talk now', 'Tap the mic again to stop and send');
+  }
+
+  function stopRecording() {
+    const seconds = stopTimer();
+    stream.getTracks().forEach(t => t.stop()); // turns off the browser's mic indicator
+    if (seconds < 1) {
+      recorder.onstop = null;
+      recorder.stop();
+      setState('idle', 'Mic is off', 'That was too short — tap the mic and try again');
+      return;
+    }
+    recorder.stop(); // triggers sendRecording
+  }
+
+  // ── Sending to n8n ────────────────────────────────────────
+  async function sendRecording() {
+    const type = recorder.mimeType || 'audio/webm';
+    const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+    const blob = new Blob(chunks, { type });
+
+    setState('sending', '<span class="spinner"></span>Mic off — sending to webhook…', 'Transcribing your message');
+    addMsg('🎙️ Voice message sent', 'user');
+
+    const fd = new FormData();
+    fd.append('data', blob, 'voice.' + ext);
+    fd.append('sessionId', SESSION_ID);
+
+    try {
+      const res = await fetch(WEBHOOK_URL, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error('Webhook responded with ' + res.status);
+
+      const raw = await res.text();
+      let data; try { data = JSON.parse(raw); } catch { data = { reply: raw }; }
+
+      if (data.transcript) addMsg('You said: “' + data.transcript + '”', 'sys');
+      addMsg(data.reply || data.output || data.text || '(empty reply)', 'bot');
+      setState('idle', 'Mic is off', 'Tap the mic to talk again');
+    } catch (err) {
+      addMsg('Sending failed: ' + err.message, 'err');
+      setState('error', 'Send failed', 'Tap the mic to try again');
+    }
+  }
+
+  // ── Toggle ────────────────────────────────────────────────
+  micBtn.addEventListener('click', () => {
+    if (recorder && recorder.state === 'recording') stopRecording();
+    else startRecording();
+  });
+</script>
+</body>
+</html>
