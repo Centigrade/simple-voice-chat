@@ -186,7 +186,7 @@
     fd.append('sessionId', SESSION_ID);
 
     try {
-      const res = await fetch(WEBHOOK_URL, { method: 'POST', body: fd });
+      const res = await fetch("https://automation-training.centigrade.de/webhook-test/process", { method: 'POST', body: fd });
       if (!res.ok) throw new Error('Webhook responded with ' + res.status);
 
       const raw = await res.text();
