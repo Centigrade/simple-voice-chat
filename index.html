@@ -37,6 +37,7 @@
   body[data-state="recording"] #mic { background: var(--rec); animation: pulse 1.4s infinite; }
   body[data-state="sending"]   #mic { background: var(--busy); }
   body[data-state="error"]     #mic { background: var(--muted); }
+  body[data-state="playing"]   #mic { background: var(--ok); }
 
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 rgba(229,56,59,.55); }
@@ -73,6 +74,8 @@
   .msg.bot  { align-self: flex-start; background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
   .msg.sys  { align-self: center; color: var(--muted); font-size: .85rem; }
   .msg.err  { align-self: center; color: var(--rec); font-size: .9rem; }
+  .msg.audio { width: 85%; }
+  .msg.audio audio { width: 100%; display: block; }
 </style>
 </head>
 <body data-state="idle">
@@ -189,22 +192,64 @@
       const res = await fetch("https://automation-training.centigrade.de/webhook-test/process", { method: 'POST', body: fd });
       if (!res.ok) throw new Error('Webhook responded with ' + res.status);
 
-      const raw = await res.text();
-      let data; try { data = JSON.parse(raw); } catch { data = { reply: raw }; }
+      const contentType = res.headers.get('Content-Type') || '';
 
-      if (data.transcript) addMsg('You said: “' + data.transcript + '”', 'sys');
-      addMsg(data.reply || data.output || data.text || '(empty reply)', 'bot');
-      setState('idle', 'Mic is off', 'Tap the mic to talk again');
+      if (contentType.startsWith('audio/')) {
+        // Webhook returned an audio file → play it
+        const audioBlob = await res.blob();
+        playReply(audioBlob);
+      } else {
+        // Fallback: JSON or plain text reply
+        const raw = await res.text();
+        let data; try { data = JSON.parse(raw); } catch { data = { reply: raw }; }
+        if (data.transcript) addMsg('You said: “' + data.transcript + '”', 'sys');
+        addMsg(data.reply || data.output || data.text || '(empty reply)', 'bot');
+        setState('idle', 'Mic is off', 'Tap the mic to talk again');
+      }
     } catch (err) {
       addMsg('Sending failed: ' + err.message, 'err');
       setState('error', 'Send failed', 'Tap the mic to try again');
     }
   }
 
+  // ── Playing the audio reply ───────────────────────────────
+  let currentAudio = null;
+
+  function playReply(blob) {
+    const url = URL.createObjectURL(blob);
+    const bubble = document.createElement('div');
+    bubble.className = 'msg bot audio';
+    const audio = document.createElement('audio');
+    audio.controls = true;   // keeps the reply replayable in the chat log
+    audio.src = url;
+    bubble.appendChild(audio);
+    logEl.appendChild(bubble);
+    bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+
+    if (currentAudio) currentAudio.pause();
+    currentAudio = audio;
+
+    // Only reset the UI if we're still in "playing" (not if the user already started recording)
+    const backToIdle = () => {
+      if (document.body.dataset.state === 'playing') setState('idle', 'Mic is off', 'Tap the mic to talk again');
+    };
+    audio.onended = backToIdle;
+    audio.onpause = backToIdle;
+    audio.onplay  = () => setState('playing', '🔊 Playing reply…', 'Tap the mic to interrupt and talk');
+
+    audio.play().catch(() => {
+      // Browser blocked autoplay → user can press play in the bubble
+      setState('idle', 'Reply ready', 'Press play on the reply below');
+    });
+  }
+
   // ── Toggle ────────────────────────────────────────────────
   micBtn.addEventListener('click', () => {
     if (recorder && recorder.state === 'recording') stopRecording();
-    else startRecording();
+    else {
+      if (currentAudio && !currentAudio.paused) currentAudio.pause(); // stop reply before talking
+      startRecording();
+    }
   });
 </script>
 </body>
